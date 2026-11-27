@@ -809,6 +809,10 @@ pub(crate) struct HostTexture {
     pub(crate) host_written: std::sync::atomic::AtomicBool,
     /// Its uploads from title memory (`crate::texture`), made on first use.
     pub(crate) staging: std::sync::Mutex<Option<std::sync::Arc<crate::texture::Staging>>>,
+    /// First-upload claim by the copy-ahead queue (`crate::texture::ahead`).
+    pub(crate) ahead: std::sync::atomic::AtomicU8,
+    /// The fence-published first upload, exposed to one descriptor revision.
+    pub(crate) ahead_ready: std::sync::Mutex<Option<crate::texture::ahead::Ready>>,
     /// A depth texture's writable twin (`crate::twin`), made with its first
     /// unordered access view; `None` inside if it has none.
     pub(crate) twin: std::sync::OnceLock<Option<crate::twin::Twin>>,
@@ -848,6 +852,8 @@ impl HostTexture {
             castable,
             host_written: false.into(),
             staging: std::sync::Mutex::new(None),
+            ahead: crate::texture::ahead::fresh(),
+            ahead_ready: std::sync::Mutex::new(None),
             twin: std::sync::OnceLock::new(),
             bytes,
             used: false.into(),
@@ -856,6 +862,12 @@ impl HostTexture {
             placement: None,
             last: [crate::queue::presented().into(), now_ms().into()],
         }
+    }
+
+    /// Whether no list or shader slot has named it yet: a first upload may
+    /// still be taken by the copy-ahead queue.
+    pub(crate) fn fresh(&self) -> bool {
+        !self.used.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The title used it now: a list of the title's names it, or a shader

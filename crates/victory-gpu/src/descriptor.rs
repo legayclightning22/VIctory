@@ -467,7 +467,7 @@ static VIEWS: std::sync::Mutex<Views> = std::sync::Mutex::new(Views {
     by_resource: std::collections::BTreeMap::new(),
     free: Vec::new(),
 });
-const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");
+pub(crate) const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");
 
 impl View {
     /// The resource objects the view names.

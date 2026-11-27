@@ -738,6 +738,16 @@ impl HostHeap {
         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
+        // A new slot waits for its upload (or one more look) when asked to.
+        if crate::texture::ahead::slot_hidden(index, handle) {
+            return None;
+        }
+        if for_draw {
+            crate::texture::ahead::hold_slot(index, handle, None);
+            if crate::texture::ahead::slot_hidden(index, handle) {
+                return None;
+            }
+        }
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
         let Some(view) = view else {
@@ -807,6 +817,22 @@ impl HostHeap {
                 return Some(view);
             }
         }
+        // A fresh texture's first copy runs on the queue of its own. Do not
+        // let a descriptor name it until that copy's fence has run.
+        let ahead_copy = crate::texture::ahead::view_resource(&view)
+            .and_then(|resource| crate::resource::host_copy(resource).map(|copy| (resource, copy)));
+        if let Some((resource, copy)) = &ahead_copy {
+            if made[index as usize] != key {
+                crate::texture::ahead::discard(copy);
+            }
+            match crate::texture::ahead::request(*resource, copy, 0) {
+                crate::texture::ahead::Status::Pending => return None,
+                crate::texture::ahead::Status::Ready => {
+                    let _ = crate::texture::ahead::while_ready(copy, || {});
+                }
+                crate::texture::ahead::Status::Unavailable => {}
+            }
+        }
         {
             self.set_stride(index, Some(&view));
             self.note_address(index, Some(&view));
@@ -828,6 +854,9 @@ impl HostHeap {
                 self.viewed.set(index, Some(&view), kept.is_some());
             }
             self.keep(index, kept.flatten());
+        }
+        if let Some((_, copy)) = &ahead_copy {
+            crate::texture::ahead::retire(copy);
         }
         Some(view)
     }

@@ -1239,6 +1239,9 @@ impl State {
         let (Some(host), Some(index)) = (heap.host(), heap.index(handle)) else {
             return;
         };
+        // With `VICTORY_SHOW_AFTER` the slot keeps what it showed until this
+        // list, carrying the upload, has run.
+        crate::texture::ahead::hold_slot(index, handle, Some(list));
         if let Some(view) = host.mirror(index, handle, true) {
             readable(list, u, &view, true);
         }

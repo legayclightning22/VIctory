@@ -26,6 +26,8 @@ use crate::host::{HostList, host};
 use crate::object::This;
 use windows::core::Interface;
 
+pub(crate) mod ahead;
+
 macro_rules! once {
     ($($arg:tt)*) => {{
         static ONCE: std::sync::Once = std::sync::Once::new();
@@ -364,10 +366,23 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
         }
         return;
     }
+    let Some(copy) = crate::resource::host_copy(resource) else {
+        return;
+    };
+    match ahead::claim_normal(&copy) {
+        // The copy queue owns this texture's first upload. Its fence is the
+        // only thing that may publish the slot or release the staging bytes.
+        ahead::Status::Pending => {
+            ahead::wait(&copy);
+            return;
+        }
+        ahead::Status::Ready => return,
+        ahead::Status::Unavailable => {}
+    }
     if !list.first_use(texture.as_raw() as usize) {
         return;
     }
-    let (Some(staging), Some(copy)) = (staging(resource, texture), crate::resource::host_copy(resource)) else {
+    let Some(staging) = staging(resource, texture) else {
         return;
     };
     // Each list recorded the copy before (run perf7: 149 textures uploaded
@@ -536,6 +551,12 @@ impl Staging {
     /// untracked texture always may).
     pub(crate) fn maybe_changed(&self) -> bool {
         self.tracked.as_ref().is_none_or(|t| !t.clean())
+    }
+
+    /// Forgets the last detile so a cancelled or lost copy is retried by the
+    /// ordinary upload path.
+    pub(crate) fn reset(&self) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Last::default();
     }
 
     /// A staging buffer with the texture memory detiled into it if it
