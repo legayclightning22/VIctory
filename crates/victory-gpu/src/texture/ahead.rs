@@ -265,23 +265,23 @@ fn failed(copy: &HostTexture) {
     REJECTED.fetch_add(1, Relaxed);
 }
 
-fn clear_ready(copy: &HostTexture) {
-    let mut ready = copy.ahead_ready.lock().unwrap_or_else(|e| e.into_inner());
+/// Invalidates the payload under the caller's existing ready lock.
+fn clear_ready(phase: &AtomicU8, ready: &mut Option<Ready>) {
     if let Some(ready) = ready.take() {
         staging_reset(&ready.staging);
     }
-    copy.ahead.store(NORMAL, Release);
+    phase.store(NORMAL, Release);
 }
 
-fn checked_ready(copy: &HostTexture, ready: &mut Option<Ready>) -> bool {
-    if copy.ahead.load(Acquire) != READY {
+fn checked_ready(phase: &AtomicU8, ready: &mut Option<Ready>) -> bool {
+    if phase.load(Acquire) != READY {
         return false;
     }
     let live = ready.as_ref().is_some_and(|r| fingerprint(&r.staging) == Some(r.fingerprint));
     if live {
         true
     } else {
-        clear_ready(copy);
+        clear_ready(phase, ready);
         false
     }
 }
@@ -292,7 +292,7 @@ pub(crate) fn status(copy: &HostTexture) -> Status {
         return state(phase);
     }
     let mut ready = copy.ahead_ready.lock().unwrap_or_else(|e| e.into_inner());
-    if checked_ready(copy, &mut ready) {
+    if checked_ready(&copy.ahead, &mut ready) {
         Status::Ready
     } else {
         Status::Unavailable
@@ -307,7 +307,7 @@ pub(crate) fn while_ready(copy: &HostTexture, publish: impl FnOnce()) -> bool {
         return false;
     }
     let mut ready = copy.ahead_ready.lock().unwrap_or_else(|e| e.into_inner());
-    if !checked_ready(copy, &mut ready) {
+    if !checked_ready(&copy.ahead, &mut ready) {
         return false;
     }
     publish();
@@ -328,7 +328,7 @@ pub(crate) fn view_resource(view: &crate::descriptor::View) -> Option<This> {
 
 pub(crate) fn retire(copy: &HostTexture) -> bool {
     let mut ready = copy.ahead_ready.lock().unwrap_or_else(|e| e.into_inner());
-    if !checked_ready(copy, &mut ready) {
+    if !checked_ready(&copy.ahead, &mut ready) {
         return false;
     }
     ready.take();
@@ -345,7 +345,8 @@ pub(crate) fn discard(copy: &HostTexture) {
         copy.ahead.store(next, Release);
     }
     if phase == READY {
-        clear_ready(copy);
+        let mut ready = copy.ahead_ready.lock().unwrap_or_else(|e| e.into_inner());
+        clear_ready(&copy.ahead, &mut ready);
     }
 }
 
@@ -627,6 +628,18 @@ pub(crate) fn slot_hidden(index: u32, handle: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_ready_payload_returns_to_normal_under_the_existing_lock() {
+        let phase = AtomicU8::new(READY);
+        let slot = Mutex::new(None);
+        let mut ready = slot.lock().unwrap();
+        // A reader can see READY between the worker's phase store and
+        // publication of its payload. The caller still owns the slot lock.
+        assert!(!checked_ready(&phase, &mut ready));
+        assert_eq!(phase.load(Acquire), NORMAL);
+        assert!(ready.is_none());
+    }
 
     #[test]
     fn state_transitions_only_publish_after_the_copy_fence() {
